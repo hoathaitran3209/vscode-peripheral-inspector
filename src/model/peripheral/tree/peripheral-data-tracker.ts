@@ -49,7 +49,7 @@ export class PeripheralDataTracker {
         return this.sessionPeripherals;
     }
 
-    constructor(tracker: DebugTracker, protected resolver: SvdResolver, protected api: PeripheralInspectorAPI, protected config: PeripheralConfigurationProvider, protected context: vscode.ExtensionContext) {
+    constructor(protected tracker: DebugTracker, protected resolver: SvdResolver, protected api: PeripheralInspectorAPI, protected config: PeripheralConfigurationProvider, protected context: vscode.ExtensionContext) {
         tracker.onWillStartSession(session => this.onDebugSessionStarted(session));
         tracker.onWillStopSession(session => {
             // A start still resolving its definition file must not show a view for an ended session
@@ -330,6 +330,9 @@ export class PeripheralDataTracker {
         if (!svdPath?.trim()) {
             throw new Error('Peripheral definition path is required');
         }
+        if (this.tracker.ignoreSessionStart(session.id)) {
+            return;
+        }
 
         // Supersedes a start of the session that is still resolving its definition file
         this.sessionStarts.set(session.id, {});
@@ -341,13 +344,16 @@ export class PeripheralDataTracker {
     }
 
     protected async onDebugSessionStarted(session: vscode.DebugSession): Promise<void> {
+        if (this.tracker.ignoreSessionStart(session.id)) {
+            return;
+        }
         const start = {};
         this.sessionStarts.set(session.id, start);
         const wsFolderPath = session.workspaceFolder ? session.workspaceFolder.uri : vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders[0].uri;
         const svdPath = await this.resolver.resolve(session, wsFolderPath);
 
         // Resolving can take long (a pack download or picker): a restart or stop meanwhile supersedes this start
-        if (this.sessionStarts.get(session.id) !== start) {
+        if (this.sessionStarts.get(session.id) !== start || this.tracker.ignoreSessionStart(session.id)) {
             return;
         }
 
@@ -374,6 +380,10 @@ export class PeripheralDataTracker {
         });
 
         this.sessionPeripherals.set(session.id, peripheralTree);
+        if (this.tracker.ignoreSessionStart(session.id)) {
+            this.onDebugSessionTerminated(session);
+            return;
+        }
         const thresh = this.config.addressGapThreshold(session);
 
         try {
@@ -381,6 +391,11 @@ export class PeripheralDataTracker {
         } catch (e) {
             vscode.debug.activeDebugConsole.appendLine(`Internal Error: Unexpected rejection of promise ${e}`);
         } finally {
+            // Stop can arrive while the definition file is parsing, after the empty terminate returned.
+            if (this.sessionPeripherals.get(session.id) === peripheralTree
+                && this.tracker.ignoreSessionStart(session.id)) {
+                this.onDebugSessionTerminated(session);
+            }
             this.fireOnDidChange();
         }
 
